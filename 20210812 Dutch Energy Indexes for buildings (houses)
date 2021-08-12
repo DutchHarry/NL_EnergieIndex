@@ -1,0 +1,309 @@
+/*
+Dutch Energy Indexes for buildings (houses)
+
+Are avaiabe at
+https://www.ep-online.nl/PublicData
+
+Create an API Key and download iether the XML or the CSV version.
+XML version appeared too big for my system, especially because all of about 4+Gb <PandCertificaat> data is in one line.
+After splitting into 600Mb chunks it did work.
+
+CSV version even isn't a valid .CSV.
+There are a few lines where there is no text-indicator, but where there is a CSV-delimiter within the column.
+Thus the imports break, at least since a structrue change from 202104 onwards.
+Luckily the bluk insert gives the line and position of the encountered error, so wit a bit of handycrafting, you'll succeed.
+
+And then there are differences in the data XML and CSV file versions contain.
+E.g. only CSV has the BAG id needed for linking with BAG.
+
+Having said all this, the following works for XML (if you have sufficient memory):
+*/
+
+USE EP_ONLINE;
+GO
+
+DECLARE @epxml xml;
+SELECT @epxml = C
+FROM OPENROWSET (BULK 'G:\_downloads\v20210801_xml\v20210801_xml.XML', SINGLE_BLOB) AS EP(C);
+
+SELECT @epxml;
+    
+DECLARE @hdoc int;
+
+EXEC sp_xml_preparedocument @hdoc OUTPUT, @epxml
+
+/*
+1 = attributes
+2 = elements
+*/
+
+--INSERT into EP_v20210801_xml
+SELECT 
+ *
+into EP_v20210801_xml
+FROM OPENXML (@hdoc, '//Pandcertificaten/Pandcertificaat' , 2)
+WITH(
+  Pand_opnamedatum VARCHAR(1000)
+, Pand_opnametype VARCHAR(1000)
+, Pand_status VARCHAR(1000)
+, Pand_berekeningstype VARCHAR(1000)
+, Pand_energieklasse VARCHAR(1000)
+, Pand_energielabel_is_prive VARCHAR(1000)
+, Pand_is_op_basis_van_referentie_gebouw VARCHAR(1000)
+, Pand_gebouwklasse VARCHAR(1000)
+, Meting_geldig_tot VARCHAR(1000)
+, Pand_registratiedatum VARCHAR(1000)
+, Pand_gebouwtype VARCHAR(1000)
+, Pand_projectnaam VARCHAR(1000)
+, Pand_projectobject VARCHAR(1000)
+, Pand_gebruiksoppervlakte VARCHAR(1000)
+, Pand_energiebehoefte VARCHAR(1000)
+, Pand_eis_energiebehoefte VARCHAR(1000)
+, Pand_primaire_fossiele_energie VARCHAR(1000)
+, Pand_eis_primaire_fossiele_energie VARCHAR(1000)
+, Pand_aandeel_hernieuwbare_energie VARCHAR(1000)
+, Pand_eis_aandeel_hernieuwbare_energie VARCHAR(1000)
+, Pand_temperatuuroverschrijding VARCHAR(1000)
+, Pand_eis_temperatuuroverschrijding VARCHAR(1000)
+, Pand_warmtebehoefte VARCHAR(1000)
+-- following not in xmlversion (testing right now ;^) )
+, Pand_aandeel_hernieuwbare_energie_EMG_forfaitair VARCHAR(1000)
+, Pand_bagligplaatsid VARCHAR(1000)
+, Pand_bagpandid VARCHAR(1000)
+, Pand_bagstandplaatsid VARCHAR(1000)
+, Pand_bagverblijfsobjectid VARCHAR(1000)
+, Pand_detailaanduiding VARCHAR(1000)
+, Pand_energieindex VARCHAR(1000)
+, Pand_energieindex_met_EMG_forfaitair VARCHAR(1000)
+, Pand_gebouwsubtype VARCHAR(1000)
+, Pand_huisnummer VARCHAR(1000)
+, Pand_huisnummer_toev VARCHAR(1000)
+, Pand_postcode VARCHAR(1000)
+, Pand_primaire_fossiele_energie_EMG_forfaitair VARCHAR(1000)
+, Pand_SBIcode VARCHAR(1000)
+)
+;   
+    
+EXEC sp_xml_removedocument @hdoc
+GO
+
+
+/*
+AND the follwing pulls the CSV file in
+Remember you'll have to manually adjust a few lines as indicated in the script
+*/
+
+USE EP_ONLINE;
+GO
+
+/*
+
+REP
+Import Energieindex files
+
+delimiter is ';', but needs replace of '; ' with something else
+used '|' as delimiter and '£ ' as 'intermdiate for '; '
+This of course breaks if a column value starts with a space, as it does occasionally
+
+
+Replace manually in 20210301 (and later):
+From 20210801:
+21297:
+  Bouwnummer 1£ 
+  Bouwnummer 2£ 
+  Bouwnummer 3£ 
+  Bouwnummer 4£ 
+  Bouwnummer 5£ 
+  Bouwnummer 6£ 
+  Bouwnummer 7£ 
+  Bouwnummer 8£ 
+173221:
+  168C£ 168D
+1523736:
+  32£33£34£35
+2315261:
+  1a£ 1b£ 1c£ 5£ 7
+2328516:
+  7-01£7
+3897899:
+  97£99
+4306414:
+  2B£2C
+
+not in 20210801:
+Groene Wei£ 
+
+
+
+IT STILL BREAKS, SO A BIT OF HANDYCRAFTING AFTER THIS
+SCRIPT ERROR WILL GIVE THE LINE IN THE FILE SO YOU CAN CHECK
+
+OTHER OPTION IS:
+IMPORT AS ONE LINE AND SPLIT IT, WHILE 'JAILING' THE ERRORS'
+THE CHECK ERRORS MANUALLY TO SEE IF THERE IS A RULE TO APLLY (PROBABLY NOT REPLACING ' ;' !!
+
+*/
+
+
+
+DECLARE @TablePrefix varchar(100) = '';
+DECLARE @EPDirectoryName varchar(255) = '';
+DECLARE @EPFileName varchar(255) = '';
+DECLARE @tablename varchar(1000) = '';
+DECLARE @doscommand varchar(8000);
+DECLARE @result int; 
+DECLARE @sql nvarchar(max) ='';
+DECLARE @CSVFieldTerminator varchar(1) = ';';  -- until 20210201 ';' after that replace action '~' )IN FILE '|', NOT IN FILE '~' AND '@'
+DECLARE @CSVFieldTerminatorAfterLast varchar(1) = 'Y';
+DECLARE @CSVFieldQuote varchar(1) = '';
+DECLARE @debug varchar(5) = 'Y'; --Y,I,N
+DECLARE @quote varchar(5)= '''';
+DECLARE @crlf varchar(5) = CHAR(13)+CHAR(10);
+DECLARE @msg varchar(8000) = ''
+
+
+DECLARE EP_Dir_Cursor CURSOR 
+  FAST_FORWARD
+  FOR 
+  SELECT t.v FROM (VALUES 
+   ('D:\NLDATA\EP\MONTHLY_ALL\CSV')
+ ) AS t(v);
+OPEN EP_Dir_Cursor  
+FETCH NEXT FROM EP_Dir_Cursor
+INTO @EPDirectoryName; 
+WHILE @@FETCH_STATUS = 0  
+BEGIN  
+  PRINT @EPDirectoryName;
+--  SET @TablePrefix = 'TblCBS_'+SUBSTRING(@EPDirectoryName,28,4)+'_PC6hNr_'
+  SET @TablePrefix = 'TblEI_'
+  --BEGIN DO SOMETHING WITHIN CURSOR
+
+  -- BEGIN get dir into table
+  DROP TABLE IF EXISTS #CommandShell;
+  CREATE TABLE #CommandShell ( Line VARCHAR(512));
+  SET @doscommand = 'dir "'+@EPDirectoryName+ '\*.csv" /TC';
+  --PRINT @doscommand;
+  INSERT INTO #CommandShell
+  EXEC @result = MASTER..xp_cmdshell   @doscommand ;
+  IF (@result = 0)  
+     PRINT 'Success'  
+  ELSE  
+     PRINT 'Failure'  
+  ;
+  DELETE
+  FROM   #CommandShell
+  WHERE  Line NOT LIKE '[0-9][0-9]/[0-9][0-9]/[0-9][0-9][0-9][0-9] %'
+  OR Line LIKE '%<DIR>%'
+  OR Line is null
+  ;
+  -- END get dir into table
+
+    DECLARE EP_File_Cursor CURSOR 
+    FAST_FORWARD
+    FOR 
+    SELECT
+      CBSFileName = REVERSE( LEFT(REVERSE(Line),CHARINDEX(' ',REVERSE(Line))-1 ) )
+    FROM #CommandShell
+    WHERE 1=1
+    AND CONVERT(bigint,REPLACE(TRIM(SUBSTRING(Line,18,19)),'.',''))>4 --avoid CategoryGroups with only 2 double quotes in it
+    OPEN EP_File_Cursor  
+    FETCH NEXT FROM EP_File_Cursor
+    INTO @EPFileName; 
+    WHILE @@FETCH_STATUS = 0  
+    BEGIN  
+      DROP TABLE IF EXISTS [tmp_One_Column];
+      CREATE TABLE [tmp_One_Column](
+        OneColumn varchar(max) NULL
+      );
+      SET @sql = '
+      BULK INSERT [tmp_One_Column]
+      FROM '+@quote+@EPDirectoryName+'\'+@EPFileName+@quote+'
+      WITH (
+        CODEPAGE = '+@quote+'RAW'+@quote+'
+      , DATAFILETYPE = '+@quote+'char'+@quote+'
+      , ROWTERMINATOR = '+@quote+'\n'+@quote+'
+      , FIRSTROW = 1
+      , LASTROW = 1
+      , TABLOCK
+      );'
+      IF @debug = 'Y' 
+		  BEGIN
+        SET @msg = @sql
+		    IF LEN(@msg) > 2047
+			    PRINT @msg;
+		    ELSE
+			    RAISERROR (@msg, 0, 1) WITH NOWAIT; 
+	    END;
+	    EXEC (@sql);
+      --drop table
+      SET @sql = 'DROP TABLE IF EXISTS ['+@TablePrefix+REPLACE(@EPFileName,'.csv','')+'];'
+      IF @debug = 'Y' 
+		  BEGIN
+        SET @msg = @sql
+		    IF LEN(@msg) > 2047
+			    PRINT @msg;
+		    ELSE
+			    RAISERROR (@msg, 0, 1) WITH NOWAIT; 
+	    END;
+      EXEC (@sql);
+      --create table
+      SELECT @sql = 'CREATE TABLE ['+@TablePrefix+REPLACE(@EPFileName,'.csv','')+'] ('+@crlf+'['+REPLACE(SUBSTRING(t1.OneColumn,1,LEN(t1.OneColumn)-CASE WHEN @CSVFieldTerminatorAfterLast = 'Y' THEN 1 ELSE 0 END),@CSVFieldTerminator,'] varchar(max) NULL,'+@crlf+'[')+'] varchar(max) NULL'+CASE WHEN @CSVFieldTerminatorAfterLast = 'Y' THEN ','+@crlf+'[empty1] varchar(max) NULL)' ELSE ')' END+';'
+      FROM [tmp_One_Column] t1
+      ;
+      IF @debug = 'Y' 
+		  BEGIN
+        SET @msg = @sql
+		    IF LEN(@msg) > 2047
+			    PRINT @msg;
+		    ELSE
+			    RAISERROR (@msg, 0, 1) WITH NOWAIT; 
+	    END;
+      EXEC (@sql);
+      --load data
+      SET @sql = '
+      BULK INSERT ['+@TablePrefix+REPLACE(@EPFileName,'.csv','')+']
+      FROM '+@quote+@EPDirectoryName+'\'+@EPFileName+@quote+'
+      WITH (
+        CODEPAGE = '+@quote+'RAW'+@quote+'
+      , FORMAT = '+@quote+'CSV'+@quote+'
+      --, DATAFILETYPE = '+@quote+'char'+@quote+'
+      , ROWTERMINATOR = '+@quote+'\n'+@quote+'
+      , FIELDTERMINATOR = '+@quote+@CSVFieldTerminator+@quote+'
+      , FIELDQUOTE = '+@quote+@CSVFieldQuote+@quote+'
+      , FIRSTROW = 2
+      , TABLOCK
+      );'
+      IF @debug = 'Y' 
+		  BEGIN
+        SET @msg = @sql
+		    IF LEN(@msg) > 2047
+			    PRINT @msg;
+		    ELSE
+			    RAISERROR (@msg, 0, 1) WITH NOWAIT; 
+	    END;
+      EXEC (@sql);
+
+      --drop 1 line table
+      DROP TABLE IF EXISTS [tmp_One_Column];
+
+      FETCH NEXT FROM EP_File_Cursor   
+      INTO @EPFileName; 
+    END
+    CLOSE EP_File_Cursor;  
+    DEALLOCATE EP_File_Cursor;  
+
+
+
+
+
+  -- drop directory table
+  DROP TABLE IF EXISTS #CommandShell;
+
+  --END   DO SOMETHING WITHIN CURSOR
+  FETCH NEXT FROM EP_Dir_Cursor   
+    INTO @EPDirectoryName;
+END   
+CLOSE EP_Dir_Cursor;  
+DEALLOCATE EP_Dir_Cursor;  
+
+GO
